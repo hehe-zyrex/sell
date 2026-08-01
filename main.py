@@ -39,29 +39,15 @@ DEFAULT_CONFIG = {
     "keywords": {}
 }
 
-# QR is fixed
-QR_KEYWORD = "qr"
-QR_LINK = os.environ.get("QR_LINK", "https://i.postimg.cc/hGt6DrDy/photo-2026-08-01-16-06-44.jpg")
+# QR Configuration - Store QR as static image
+QR_CONFIG = {
+    "keyword": "qr",
+    # This is the static QR code image URL (Paytm QR from your image)
+    "qr_image_url": "https://i.postimg.cc/hGt6DrDy/photo-2026-08-01-16-06-44.jpg",
+    "caption": "📱 Scan to Pay\n\nPaytm UPI ID: paytm.s2sps2y@pty\n\nGet Assured Cashback!"
+}
 
-print("🚀 Bot running with Customizable Keyword-Response Engine...")
-
-def generate_qr_code(link):
-    """Generate QR code from link and return as BytesIO object."""
-    qr = qrcode.QRCode(
-        version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_L,
-        box_size=10,
-        border=4,
-    )
-    qr.add_data(link)
-    qr.make(fit=True)
-    
-    img = qr.make_image(fill_color="black", back_color="white")
-    img_bytes = BytesIO()
-    img_bytes.name = "qr_code.png"
-    img.save(img_bytes, format="PNG")
-    img_bytes.seek(0)
-    return img_bytes
+print(f"🚀 Bot started with QR Image: {QR_CONFIG['qr_image_url']}")
 
 def load_user_config(chat_id):
     """Load user configuration from file or return default."""
@@ -90,15 +76,76 @@ async def start_handler(event):
         "Welcome! Apna userbot chalu karne ke liye `/login` command bhejen.\n\n"
         "📌 **Features:**\n"
         "• 📝 Custom Keywords with Custom Responses\n"
-        "• 📱 QR Code Generator (Fixed - 'qr' keyword)\n\n"
+        "• 📱 QR Code Image (Static - sends your QR image)\n\n"
         "⚙️ **Commands:**\n"
         "`/addkeyword <word> <response>` - Add a new keyword with response\n"
         "`/removekeyword <word>` - Remove a keyword\n"
         "`/listkeywords` - Show all your keywords\n"
-        "`/setqrlink <link>` - Change QR code link\n"
+        "`/setqr <image_url> <caption>` - Change QR image and caption\n"
         "`/resetconfig` - Reset all keywords\n\n"
         "🚪 **Logout:** `/logout` to stop your userbot"
     )
+
+# ─── MAIN BOT QR HANDLER (For /qr command) ───
+@bot.on(events.NewMessage(pattern="/qr"))
+async def main_bot_qr_handler(event):
+    """Handle /qr command directly from main bot."""
+    try:
+        qr_image_url = QR_CONFIG['qr_image_url']
+        caption = QR_CONFIG['caption']
+        
+        # Send the QR image from URL
+        await bot.send_message(
+            event.chat_id,
+            f"📱 Here is your QR Code:\n\n{qr_image_url}\n\n{caption}"
+        )
+        print(f"Sent QR image URL to {event.chat_id} from main bot")
+    except Exception as e:
+        print(f"Error sending QR image in main bot: {e}")
+        await event.reply("❌ Failed to send QR code. Please try again later.")
+
+# ─── MAIN BOT QR HANDLER (For typing "qr" without slash) ───
+@bot.on(events.NewMessage)
+async def main_bot_message_handler(event):
+    """Handle messages sent to main bot."""
+    chat_id = event.chat_id
+    text = event.text.strip() if event.text else ""
+    
+    # Handle login flow
+    if chat_id in user_states:
+        return
+    
+    # Handle QR command directly in main bot
+    if text and text.lower().strip() == "qr":
+        try:
+            qr_image_url = QR_CONFIG['qr_image_url']
+            caption = QR_CONFIG['caption']
+            
+            # Send the QR image from URL
+            await bot.send_message(
+                chat_id,
+                f"📱 Here is your QR Code:\n\n{qr_image_url}\n\n{caption}"
+            )
+            print(f"Sent QR image URL to {chat_id} from main bot")
+        except Exception as e:
+            print(f"Error sending QR image in main bot: {e}")
+            await event.reply("❌ Failed to send QR code. Please try again later.")
+        return
+    
+    # Handle price command directly in main bot (for testing)
+    if text and text.lower().strip() == "price":
+        await event.reply(
+            "📦 **Welcome to our store!**\n\n"
+            "This is a demo price list.\n"
+            "Login with `/login` to customize your own keywords and responses!\n\n"
+            "📌 **Demo Products:**\n"
+            "- Product A: $10\n"
+            "- Product B: $20\n"
+            "- Product C: $30\n"
+            "- Product D: $40\n\n"
+            "For bulk orders, contact support."
+        )
+        return
 
 @bot.on(events.NewMessage(pattern="/login"))
 async def login_handler(event):
@@ -247,8 +294,9 @@ async def list_keywords_handler(event):
     
     await event.reply(keyword_list)
 
-@bot.on(events.NewMessage(pattern="/setqrlink"))
-async def set_qr_link_handler(event):
+# ─── SET QR COMMAND ───
+@bot.on(events.NewMessage(pattern="/setqr"))
+async def set_qr_handler(event):
     chat_id = event.chat_id
     if chat_id not in active_sessions:
         await event.reply("❌ **Pehle login karein!** `/login` command use karein.")
@@ -257,20 +305,38 @@ async def set_qr_link_handler(event):
     args = event.raw_text.split(maxsplit=1)
     if len(args) < 2:
         await event.reply(
-            "❌ **Usage:** `/setqrlink <link>`\n\n"
-            "Example: `/setqrlink https://t.me/yourchannel`"
+            "❌ **Usage:** `/setqr <image_url>`\n\n"
+            "Example: `/setqr https://i.postimg.cc/hGt6DrDy/photo-2026-08-01-16-06-44.jpg`\n\n"
+            "To set caption also:\n"
+            "`/setqr <image_url> | <caption>`\n"
+            "Example: `/setqr https://i.postimg.cc/hGt6DrDy/photo-2026-08-01-16-06-44.jpg | Scan to Pay`"
         )
         return
     
-    new_link = args[1].strip()
-    global QR_LINK
-    QR_LINK = new_link
+    # Check if there's a caption with pipe separator
+    content = args[1]
+    if " | " in content:
+        parts = content.split(" | ", 1)
+        new_url = parts[0].strip()
+        new_caption = parts[1].strip()
+    else:
+        new_url = content.strip()
+        new_caption = "📱 Here is your QR Code"
+    
+    # Update QR config
+    global QR_CONFIG
+    old_url = QR_CONFIG['qr_image_url']
+    QR_CONFIG['qr_image_url'] = new_url
+    QR_CONFIG['caption'] = new_caption
     
     await event.reply(
-        f"✅ **QR Link Updated!**\n\n"
-        f"🆕 New Link: `{QR_LINK}`\n\n"
-        f"Ab users ko QR code is link ke liye generate hoga."
+        f"✅ **QR Code Updated!**\n\n"
+        f"🔄 Old URL: `{old_url[:50]}...`\n"
+        f"🆕 New URL: `{new_url[:50]}...`\n"
+        f"📝 Caption: `{new_caption}`\n\n"
+        f"Ab users ko 'qr' bhejne par yeh QR image milega."
     )
+    print(f"QR Updated: {new_url}")
 
 @bot.on(events.NewMessage(pattern="/resetconfig"))
 async def reset_config_handler(event):
@@ -407,23 +473,25 @@ async def run_user_bot(session_string, chat_id):
                 print(f"Received from {sender.first_name} (ID: {sender.id}): {message_text}")
 
                 try:
+                    # Check custom keywords
                     if message_text in config["keywords"]:
                         await event.reply(config["keywords"][message_text])
                         print(f"Sent response for '{message_text}' to {sender.id}")
 
-                    elif message_text == QR_KEYWORD:
+                    # Check for QR keyword - Send static QR image
+                    elif message_text == QR_CONFIG['keyword']:
                         try:
-                            qr_image = generate_qr_code(QR_LINK)
-                            await user_bot.send_file(
-                                sender.id,
-                                file=qr_image,
-                                caption=f"🔗 QR Code for: {QR_LINK}",
-                                force_document=False
+                            qr_image_url = QR_CONFIG['qr_image_url']
+                            caption = QR_CONFIG['caption']
+                            
+                            # Send the QR image URL with caption
+                            await event.reply(
+                                f"📱 Here is your QR Code:\n\n{qr_image_url}\n\n{caption}"
                             )
-                            print(f"Sent QR code to {sender.id}")
+                            print(f"Sent QR image URL to {sender.id}")
                         except Exception as e:
-                            print(f"Error generating QR code: {e}")
-                            await event.reply("❌ Failed to generate QR code. Please try again later.")
+                            print(f"Error sending QR image: {e}")
+                            await event.reply("❌ Failed to send QR code. Please try again later.")
 
                     elif message_text == "logout":
                         await event.reply("🔴 **Logging out...**")
@@ -452,11 +520,12 @@ async def run_user_bot(session_string, chat_id):
             welcome_msg += "\n\n"
         
         welcome_msg += (
+            f"📱 **QR Image:** `{QR_CONFIG['qr_image_url'][:50]}...`\n\n"
             f"⚙️ **Commands:**\n"
             f"  `/addkeyword <word> <response>` - Add keyword\n"
             f"  `/removekeyword <word>` - Remove keyword\n"
             f"  `/listkeywords` - View all keywords\n"
-            f"  `/setqrlink <link>` - Change QR link\n"
+            f"  `/setqr <image_url> | <caption>` - Change QR image\n"
             f"  `/resetconfig` - Remove all keywords\n\n"
             f"📱 **QR:** Send 'qr' to get QR code\n"
             f"🚪 **Logout:** Send 'logout' to stop"
