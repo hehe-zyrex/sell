@@ -41,7 +41,7 @@ DEFAULT_CONFIG = {
 
 # QR is fixed
 QR_KEYWORD = "qr"
-QR_LINK = os.environ.get("QR_LINK", "https://t.me/yourchannel")
+QR_LINK = os.environ.get("QR_LINK", "https://i.postimg.cc/hGt6DrDy/photo-2026-08-01-16-06-44.jpg")
 
 print("🚀 Bot running with Customizable Keyword-Response Engine...")
 
