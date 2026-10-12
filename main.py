@@ -24,10 +24,10 @@ def run_flask():
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
 
 # ─── CONFIGURATION ───
-API_ID = int(os.environ.get("API_ID",))
+API_ID = int(os.environ.get("API_ID", ))
 API_HASH = os.environ.get("API_HASH", )
 BOT_TOKEN = os.environ.get("BOT_TOKEN", )
-MY_OWNER_ID = int(os.environ.get("MY_OWNER_ID",))
+MY_OWNER_ID = int(os.environ.get("MY_OWNER_ID", ))
 
 bot = TelegramClient("price_qr_bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 user_states = {}
@@ -35,12 +35,10 @@ active_sessions = {}
 user_configs = {}
 
 # Default configuration
-# greeting_type: "none" | "text" | "sticker" | "gif" | "photo" | "video"
-# greeting_value: text string OR file path (for media)
+# greetings: list of dicts -> [{"type": "text"|"sticker"|"gif"|"photo"|"video", "value": "..."}]
 DEFAULT_CONFIG = {
     "keywords": {},
-    "greeting_type": "none",
-    "greeting_value": "",
+    "greetings": [],          # ← list of greetings, all sent on first DM
     "greeted_users": []
 }
 
@@ -64,16 +62,20 @@ def load_user_config(chat_id):
         if os.path.exists(f"config_{chat_id}.json"):
             with open(f"config_{chat_id}.json", "r") as f:
                 config = json.load(f)
-                # Backward-compat defaults
                 config.setdefault("keywords", {})
-                config.setdefault("greeting_type", "none")
-                config.setdefault("greeting_value", "")
+                config.setdefault("greetings", [])
                 config.setdefault("greeted_users", [])
-                # Migrate old "greeting" key
-                if config.get("greeting") and config.get("greeting_type", "none") == "none":
-                    config["greeting_type"] = "text"
-                    config["greeting_value"] = config["greeting"]
-                    config.pop("greeting", None)
+
+                # Migrate old single-greeting format
+                old_type = config.pop("greeting_type", None)
+                old_val = config.pop("greeting_value", None)
+                old_text = config.pop("greeting", None)
+
+                if old_type and old_type != "none" and old_val and not config["greetings"]:
+                    config["greetings"].append({"type": old_type, "value": old_val})
+                elif old_text and not config["greetings"]:
+                    config["greetings"].append({"type": "text", "value": old_text})
+
                 return config
     except:
         pass
@@ -90,24 +92,58 @@ def save_user_config(chat_id, config):
         return False
 
 
-def get_greeting_media_path(chat_id):
-    """Return path to greeting media file if it exists."""
-    for ext in (".webp", ".tgs", ".mp4", ".jpg", ".jpeg", ".png", ".gif"):
-        p = os.path.join(GREETING_DIR, f"greeting_{chat_id}{ext}")
-        if os.path.exists(p):
-            return p
-    return None
+def get_greeting_media_path(chat_id, index, ext):
+    """Return the media file path for a specific greeting index."""
+    return os.path.join(GREETING_DIR, f"greeting_{chat_id}_{index}{ext}")
 
 
-def clear_greeting_media(chat_id):
-    """Remove any existing greeting media file."""
+def clear_all_greeting_media(chat_id):
+    """Remove all greeting media files for this chat."""
+    for fname in os.listdir(GREETING_DIR):
+        if fname.startswith(f"greeting_{chat_id}_"):
+            try:
+                os.remove(os.path.join(GREETING_DIR, fname))
+            except:
+                pass
+
+
+def delete_greeting_media_file(chat_id, index):
+    """Remove all possible media extensions for a specific index."""
     for ext in (".webp", ".tgs", ".mp4", ".jpg", ".jpeg", ".png", ".gif"):
-        p = os.path.join(GREETING_DIR, f"greeting_{chat_id}{ext}")
+        p = get_greeting_media_path(chat_id, index, ext)
         if os.path.exists(p):
             try:
                 os.remove(p)
             except:
                 pass
+
+
+def reindex_greeting_media(chat_id, config):
+    """
+    After removal, media files on disk have stale indexes.
+    This renames them so file indexes match list indexes.
+    """
+    # Delete all existing files then re-download-free approach:
+    # We just re-save existing paths because we stored path in greeting value.
+    # But we want deterministic indices. Simplest: rename files to match new order.
+    new_paths = []
+    for new_idx, g in enumerate(config["greetings"]):
+        if g["type"] == "text":
+            new_paths.append(g)  # text untouched
+            continue
+        old_path = g["value"]
+        if not old_path or not os.path.exists(old_path):
+            new_paths.append(g)
+            continue
+        ext = os.path.splitext(old_path)[1]
+        new_path = get_greeting_media_path(chat_id, new_idx, ext)
+        if old_path != new_path:
+            try:
+                os.rename(old_path, new_path)
+            except:
+                pass
+        new_paths.append({"type": g["type"], "value": new_path})
+    config["greetings"] = new_paths
 
 
 # ─── MAIN BOT EVENTS ───
@@ -119,13 +155,15 @@ async def start_handler(event):
         "📌 **Features:**\n"
         "• 📝 Custom Keywords with Custom Responses\n"
         "• 📱 QR Code Image\n"
-        "• 👋 Auto Greeting on First DM (Text / Sticker / GIF)\n\n"
+        "• 👋 Multiple Greetings on First DM (Text / Sticker / GIF / Photo / Video)\n\n"
         "⚙️ **Commands:**\n"
         "`/addkeyword <word> <response>`\n"
         "`/removekeyword <word>`\n"
         "`/listkeywords`\n"
-        "`/setgreeting` - Set greeting (text / sticker / GIF)\n"
-        "`/removegreeting` - Remove greeting\n"
+        "`/setgreeting` - Add a greeting (text / sticker / GIF / media)\n"
+        "`/listgreetings` - View all greetings\n"
+        "`/removegreeting <index>` - Remove a specific greeting\n"
+        "`/cleargreetings` - Remove all greetings\n"
         "`/setqr <image_url> | <caption>`\n"
         "`/resetconfig`\n\n"
         "🚪 **Logout:** `/logout`"
@@ -275,7 +313,7 @@ async def list_keywords_handler(event):
     await event.reply(kw_list)
 
 
-# ─── SET GREETING (supports text / sticker / GIF / photo / video) ───
+# ─── SET GREETING (adds to list, doesn't replace) ───
 @bot.on(events.NewMessage(pattern="/setgreeting"))
 async def set_greeting_handler(event):
     chat_id = event.chat_id
@@ -283,33 +321,33 @@ async def set_greeting_handler(event):
         await event.reply("❌ **Pehle login karein!** `/login`")
         return
 
-    # Case 1: Reply to a message containing sticker/GIF/photo/video
+    config = load_user_config(chat_id)
+
+    # Case 1: Reply to a message containing sticker/GIF/photo/video/text
     if event.is_reply:
         replied = await event.get_reply_message()
-        saved = await save_greeting_from_message(chat_id, replied)
+        saved = await save_greeting_from_message(chat_id, replied, config)
         if saved:
+            save_user_config(chat_id, config)
+            idx = len(config["greetings"])
             await event.reply(
-                f"✅ **Greeting set from replied {saved['type']}!**\n\n"
-                f"Ab har naye user ko pehli DM par yeh {saved['type']} milega."
+                f"✅ **Greeting #{idx} added from replied {saved['type']}!**\n\n"
+                f"Ab har naye user ko pehli DM par yeh **{len(config['greetings'])} greeting(s)** milenge."
             )
         else:
-            await event.reply(
-                "❌ **Reply mein koi supported media nahi mila.**\n"
-                "Supported: Sticker, GIF, Photo, Video, Text"
-            )
+            await event.reply("❌ **Reply mein koi supported media nahi mila.**")
         return
 
     # Case 2: Text argument given
     args = event.raw_text.split(maxsplit=1)
     if len(args) >= 2 and args[1].strip():
         greeting_text = args[1].strip()
-        clear_greeting_media(chat_id)
-        config = load_user_config(chat_id)
-        config["greeting_type"] = "text"
-        config["greeting_value"] = greeting_text
+        config["greetings"].append({"type": "text", "value": greeting_text})
         save_user_config(chat_id, config)
+        idx = len(config["greetings"])
         await event.reply(
-            f"✅ **Text Greeting Set!**\n\n📝 `{greeting_text}`\n\n"
+            f"✅ **Text Greeting #{idx} Added!**\n\n📝 `{greeting_text}`\n\n"
+            f"Total greetings: **{len(config['greetings'])}**\n"
             f"Tip: `{{name}}` use karein user ke first name ke liye."
         )
         return
@@ -317,73 +355,66 @@ async def set_greeting_handler(event):
     # Case 3: No args, no reply → enter "awaiting" mode
     user_states[chat_id] = {"step": "AWAITING_GREETING"}
     await event.reply(
-        "👋 **Greeting Setup**\n\n"
-        "Ab aap jo bhi bhejenge wahi greeting ban jayega:\n\n"
+        "👋 **Add New Greeting**\n\n"
+        "Ab aap jo bhi bhejenge woh naya greeting ban jayega:\n\n"
         "• 📝 **Text** → Send any text\n"
         "• 🎨 **Sticker** → Send a sticker\n"
         "• 🎞️ **GIF** → Send a GIF\n"
         "• 🖼️ **Photo** → Send a photo\n"
         "• 🎬 **Video** → Send a video\n\n"
-        "💡 **Tip:** Aap `/setgreeting` ka reply bhi kar sakte hain kisi bhi sticker/GIF par.\n\n"
+        "💡 **Tip:** Aap kisi bhi sticker/GIF par `/setgreeting` ka reply bhi kar sakte hain.\n\n"
         "❌ Cancel karne ke liye `/cancel` bhejein."
     )
 
 
-async def save_greeting_from_message(chat_id, msg):
-    """Save greeting from a message containing media or text. Returns dict or None."""
+async def save_greeting_from_message(chat_id, msg, config):
+    """Save greeting from a message. Returns dict or None. Appends to config['greetings']."""
     if msg is None:
         return None
 
-    config = load_user_config(chat_id)
-    clear_greeting_media(chat_id)
+    next_index = len(config["greetings"])
 
     # Sticker
     if msg.sticker:
         ext = ".tgs" if msg.sticker.mime_type == "application/x-tgsticker" else ".webp"
-        path = os.path.join(GREETING_DIR, f"greeting_{chat_id}{ext}")
+        path = get_greeting_media_path(chat_id, next_index, ext)
         await bot.download_media(msg, file=path)
-        config["greeting_type"] = "sticker"
-        config["greeting_value"] = path
-        save_user_config(chat_id, config)
-        return {"type": "sticker", "path": path}
+        g = {"type": "sticker", "value": path}
+        config["greetings"].append(g)
+        return g
 
-    # GIF (Telegram sends as video with no sound / animation flag)
+    # GIF / video document
     if msg.document:
         mime = (msg.document.mime_type or "").lower()
         if "gif" in mime or "video" in mime:
             ext = ".mp4"
-            path = os.path.join(GREETING_DIR, f"greeting_{chat_id}{ext}")
+            path = get_greeting_media_path(chat_id, next_index, ext)
             await bot.download_media(msg, file=path)
-            config["greeting_type"] = "gif"
-            config["greeting_value"] = path
-            save_user_config(chat_id, config)
-            return {"type": "gif", "path": path}
+            g = {"type": "gif", "value": path}
+            config["greetings"].append(g)
+            return g
 
     # Video
     if msg.video:
-        path = os.path.join(GREETING_DIR, f"greeting_{chat_id}.mp4")
+        path = get_greeting_media_path(chat_id, next_index, ".mp4")
         await bot.download_media(msg, file=path)
-        config["greeting_type"] = "video"
-        config["greeting_value"] = path
-        save_user_config(chat_id, config)
-        return {"type": "video", "path": path}
+        g = {"type": "video", "value": path}
+        config["greetings"].append(g)
+        return g
 
     # Photo
     if msg.photo:
-        path = os.path.join(GREETING_DIR, f"greeting_{chat_id}.jpg")
+        path = get_greeting_media_path(chat_id, next_index, ".jpg")
         await bot.download_media(msg, file=path)
-        config["greeting_type"] = "photo"
-        config["greeting_value"] = path
-        save_user_config(chat_id, config)
-        return {"type": "photo", "path": path}
+        g = {"type": "photo", "value": path}
+        config["greetings"].append(g)
+        return g
 
-    # Plain text
+    # Text
     if msg.text and not msg.text.startswith("/"):
-        text = msg.text.strip()
-        config["greeting_type"] = "text"
-        config["greeting_value"] = text
-        save_user_config(chat_id, config)
-        return {"type": "text", "path": text}
+        g = {"type": "text", "value": msg.text.strip()}
+        config["greetings"].append(g)
+        return g
 
     return None
 
@@ -397,28 +428,60 @@ async def greeting_media_listener(event):
     if user_states[chat_id].get("step") != "AWAITING_GREETING":
         return
 
-    # Ignore commands
     if event.text and event.text.startswith("/"):
         if event.text.startswith("/cancel"):
             user_states.pop(chat_id, None)
             await event.reply("❌ Greeting setup cancelled.")
         return
 
-    saved = await save_greeting_from_message(chat_id, event.message)
+    config = load_user_config(chat_id)
+    saved = await save_greeting_from_message(chat_id, event.message, config)
     user_states.pop(chat_id, None)
 
     if saved:
+        save_user_config(chat_id, config)
+        idx = len(config["greetings"])
         await event.reply(
-            f"✅ **Greeting Saved!**\n\n"
-            f"🎯 Type: **{saved['type']}**\n"
-            f"📝 Value: `{str(saved['path'])[:80]}`\n\n"
-            f"Ab har naye user ko pehli DM par yeh milega."
+            f"✅ **Greeting #{idx} Saved!**\n\n"
+            f"🎯 Type: **{saved['type']}**\n\n"
+            f"Total greetings: **{len(config['greetings'])}**\n"
+            f"Ab har naye user ko pehli DM par yeh sab milenge."
         )
     else:
         await event.reply("❌ **Unsupported message type.** Please try again with /setgreeting")
 
 
-# ─── REMOVE GREETING ───
+# ─── LIST GREETINGS ───
+@bot.on(events.NewMessage(pattern="/listgreetings"))
+async def list_greetings_handler(event):
+    chat_id = event.chat_id
+    if chat_id not in active_sessions:
+        await event.reply("❌ **Pehle login karein!** `/login`")
+        return
+
+    config = load_user_config(chat_id)
+    greetings = config.get("greetings", [])
+
+    if not greetings:
+        await event.reply("📋 **No Greetings Set!**\n\nUse `/setgreeting` to add one.")
+        return
+
+    msg = "👋 **Your Greetings**\n━━━━━━━━━━━━━━━\n\n"
+    for idx, g in enumerate(greetings, 1):
+        if g["type"] == "text":
+            preview = g["value"][:80]
+            msg += f"**{idx}.** 📝 Text → `{preview}`\n"
+        else:
+            msg += f"**{idx}.** 🎯 {g['type'].capitalize()} → `{os.path.basename(g['value'])}`\n"
+
+    msg += f"\n📊 **Total:** {len(greetings)} greeting(s)\n"
+    msg += "💡 Sabhi greetings pehli DM par **ek saath** bheje jayenge.\n\n"
+    msg += "• `/removegreeting <index>` - Remove one\n"
+    msg += "• `/cleargreetings` - Remove all"
+    await event.reply(msg)
+
+
+# ─── REMOVE ONE GREETING BY INDEX ───
 @bot.on(events.NewMessage(pattern="/removegreeting"))
 async def remove_greeting_handler(event):
     chat_id = event.chat_id
@@ -426,16 +489,65 @@ async def remove_greeting_handler(event):
         await event.reply("❌ **Pehle login karein!** `/login`")
         return
 
+    args = event.raw_text.split(maxsplit=1)
     config = load_user_config(chat_id)
-    if config.get("greeting_type", "none") == "none":
+    greetings = config.get("greetings", [])
+
+    if not greetings:
         await event.reply("ℹ️ **Koi greeting set nahi hai.**")
         return
 
-    config["greeting_type"] = "none"
-    config["greeting_value"] = ""
+    if len(args) < 2 or not args[1].strip().isdigit():
+        await event.reply(
+            "❌ **Usage:** `/removegreeting <index>`\n\n"
+            f"Current greetings: **{len(greetings)}**\n"
+            "Use `/listgreetings` to see indexes."
+        )
+        return
+
+    idx = int(args[1].strip())
+    if idx < 1 or idx > len(greetings):
+        await event.reply(f"❌ **Invalid index.** Use 1 to {len(greetings)}.")
+        return
+
+    removed = greetings.pop(idx - 1)
+
+    # Delete associated media file if any
+    if removed["type"] != "text":
+        try:
+            if os.path.exists(removed["value"]):
+                os.remove(removed["value"])
+        except:
+            pass
+
+    # Reindex remaining media files
+    reindex_greeting_media(chat_id, config)
     save_user_config(chat_id, config)
-    clear_greeting_media(chat_id)
-    await event.reply("✅ **Greeting Removed!**")
+
+    await event.reply(
+        f"✅ **Greeting #{idx} Removed!**\n"
+        f"🎯 Type was: **{removed['type']}**\n\n"
+        f"Remaining greetings: **{len(config['greetings'])}**"
+    )
+
+
+# ─── CLEAR ALL GREETINGS ───
+@bot.on(events.NewMessage(pattern="/cleargreetings"))
+async def clear_greetings_handler(event):
+    chat_id = event.chat_id
+    if chat_id not in active_sessions:
+        await event.reply("❌ **Pehle login karein!** `/login`")
+        return
+
+    config = load_user_config(chat_id)
+    if not config.get("greetings"):
+        await event.reply("ℹ️ **Koi greeting set nahi hai.**")
+        return
+
+    config["greetings"] = []
+    save_user_config(chat_id, config)
+    clear_all_greeting_media(chat_id)
+    await event.reply("✅ **All Greetings Cleared!**")
 
 
 # ─── SET QR ───
@@ -476,7 +588,7 @@ async def reset_config_handler(event):
 
     config = DEFAULT_CONFIG.copy()
     save_user_config(chat_id, config)
-    clear_greeting_media(chat_id)
+    clear_all_greeting_media(chat_id)
     await event.reply("✅ **All Configuration Reset!**")
 
 
@@ -489,7 +601,6 @@ async def message_handler(event):
         return
 
     state = user_states[chat_id]
-    # Skip AWAITING_GREETING handled by greeting_media_listener
     if state.get("step") == "AWAITING_GREETING":
         return
 
@@ -594,38 +705,41 @@ async def run_user_bot(session_string, chat_id):
             print(f"📩 From {sender.first_name} (ID: {sender.id}): {message_text}")
 
             try:
-                # ─── AUTO GREETING ON FIRST DM ───
+                # ─── SEND ALL GREETINGS ON FIRST DM ───
                 sender_id_str = str(sender.id)
                 greeted = config.get("greeted_users", [])
-                g_type = config.get("greeting_type", "none")
-                g_value = config.get("greeting_value", "")
+                greetings = config.get("greetings", [])
 
-                if g_type != "none" and g_value and sender_id_str not in greeted:
-                    try:
-                        if g_type == "text":
-                            personalized = g_value.replace("{name}", sender.first_name or "there")
-                            await event.reply(personalized)
-                        elif g_type in ("sticker", "gif", "photo", "video"):
-                            media_path = get_greeting_media_path(chat_id)
-                            if media_path and os.path.exists(media_path):
-                                if g_type == "sticker":
-                                    await user_bot.send_file(sender.id, media_path, force_document=False)
-                                elif g_type == "gif":
-                                    await user_bot.send_file(sender.id, media_path, force_document=False, supports_streaming=True)
-                                elif g_type == "photo":
-                                    await user_bot.send_file(sender.id, media_path, force_document=False)
-                                elif g_type == "video":
-                                    await user_bot.send_file(sender.id, media_path, force_document=False, supports_streaming=True)
-                            else:
-                                print(f"⚠️ Greeting media missing for {chat_id}")
-                                await event.reply("👋 Welcome!")
+                if greetings and sender_id_str not in greeted:
+                    print(f"👋 Sending {len(greetings)} greeting(s) to {sender.id}")
+                    for g in greetings:
+                        try:
+                            if g["type"] == "text":
+                                personalized = g["value"].replace(
+                                    "{name}", sender.first_name or "there"
+                                )
+                                await event.reply(personalized)
+                            elif g["type"] in ("sticker", "gif", "photo", "video"):
+                                media_path = g["value"]
+                                if os.path.exists(media_path):
+                                    if g["type"] == "sticker":
+                                        await user_bot.send_file(sender.id, media_path, force_document=False)
+                                    elif g["type"] == "gif":
+                                        await user_bot.send_file(sender.id, media_path, force_document=False, supports_streaming=True)
+                                    elif g["type"] == "photo":
+                                        await user_bot.send_file(sender.id, media_path, force_document=False)
+                                    elif g["type"] == "video":
+                                        await user_bot.send_file(sender.id, media_path, force_document=False, supports_streaming=True)
+                                else:
+                                    print(f"⚠️ Missing media for greeting: {media_path}")
 
-                        greeted.append(sender_id_str)
-                        config["greeted_users"] = greeted
-                        save_user_config(chat_id, config)
-                        print(f"✅ Sent {g_type} greeting to {sender.id}")
-                    except Exception as ge:
-                        print(f"Greeting send error: {ge}")
+                            await asyncio.sleep(0.5)  # avoid flood
+                        except Exception as ge:
+                            print(f"Greeting error ({g['type']}): {ge}")
+
+                    greeted.append(sender_id_str)
+                    config["greeted_users"] = greeted
+                    save_user_config(chat_id, config)
 
                 # ─── KEYWORDS ───
                 if message_text in config["keywords"]:
@@ -655,8 +769,7 @@ async def run_user_bot(session_string, chat_id):
         # Welcome message
         keyword_count = len(config["keywords"])
         keyword_preview = list(config["keywords"].keys())[:3] if keyword_count > 0 else []
-        g_type = config.get("greeting_type", "none")
-        greeting_status = f"✅ {g_type}" if g_type != "none" else "❌ Not set"
+        greeting_count = len(config.get("greetings", []))
 
         welcome_msg = (
             f"🔥 **Custom Bot Active!**\n"
@@ -670,12 +783,12 @@ async def run_user_bot(session_string, chat_id):
             welcome_msg += "\n\n"
 
         welcome_msg += (
-            f"👋 **Greeting:** {greeting_status}\n"
+            f"👋 **Greetings Set:** {greeting_count}\n"
             f"📱 **QR:** `{QR_CONFIG['qr_image_url'][:50]}...`\n\n"
             f"⚙️ **Commands:**\n"
             f"  `/addkeyword` / `/removekeyword` / `/listkeywords`\n"
-            f"  `/setgreeting` - Text/Sticker/GIF/Photo/Video\n"
-            f"  `/removegreeting`\n"
+            f"  `/setgreeting` (add) / `/listgreetings`\n"
+            f"  `/removegreeting <index>` / `/cleargreetings`\n"
             f"  `/setqr` / `/resetconfig`\n\n"
             f"📱 Send 'qr' for QR code\n"
             f"🚪 Send 'logout' to stop"
